@@ -84,6 +84,116 @@ async function checkIn(cookie, email) {
   }
 }
 
+// ── 飞书消息卡片 ──────────────────────────────────────
+
+function feishuCard(title, content) {
+  const template = title.includes("✅") ? "green" : title.includes("❌") ? "red" : "orange";
+  return {
+    header: { title: { tag: "plain_text", content: title }, template },
+    elements: [{ tag: "markdown", content }],
+  };
+}
+
+async function sendFeishuMessage(content, title = "ikuuu 签到") {
+  const webhook = process.env.FEISHU_WEBHOOK;
+  if (!webhook) return;
+  const secret = process.env.FEISHU_SECRET;
+  const card = feishuCard(title, content);
+  let payload;
+  if (secret) {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const crypto = await import("crypto");
+    const sign = crypto
+      .createHmac("sha256", secret)
+      .update(`${timestamp}\n${secret}`)
+      .digest("base64");
+    payload = { timestamp, sign, msg_type: "interactive", card };
+  } else {
+    payload = { msg_type: "interactive", card };
+  }
+  try {
+    const resp = await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.code === 0 || data.StatusCode === 0) {
+      console.log("📤 飞书机器人 推送成功");
+    } else {
+      console.log("❌ 飞书机器人 推送失败:", JSON.stringify(data));
+    }
+  } catch (e) {
+    console.log("❌ 飞书机器人 推送异常:", e);
+  }
+}
+
+async function sendFeishuAppMessage(content, title = "ikuuu 签到") {
+  const appId = process.env.FEISHU_APP_ID;
+  const appSecret = process.env.FEISHU_APP_SECRET;
+  const receiveId = process.env.FEISHU_APP_RECEIVE_ID;
+  const receiveType = process.env.FEISHU_APP_RECEIVE_TYPE || "open_id";
+  if (!appId || !appSecret || !receiveId) return;
+
+  // 1. 获取 tenant_access_token
+  let tenantToken;
+  try {
+    const resp = await fetch(
+      "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+      }
+    );
+    const data = await resp.json();
+    tenantToken = data.tenant_access_token;
+    if (!tenantToken) {
+      console.log("❌ 飞书应用 获取token失败:", JSON.stringify(data));
+      return;
+    }
+  } catch (e) {
+    console.log("❌ 飞书应用 获取token异常:", e);
+    return;
+  }
+
+  // 2. 发送消息卡片
+  const card = feishuCard(title, content);
+  try {
+    const resp = await fetch(
+      `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${receiveType}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${tenantToken}`,
+        },
+        body: JSON.stringify({
+          receive_id: receiveId,
+          msg_type: "interactive",
+          content: JSON.stringify(card),
+        }),
+      }
+    );
+    const data = await resp.json();
+    if (data.code === 0) {
+      console.log("📤 飞书应用 推送成功");
+    } else {
+      console.log("❌ 飞书应用 推送失败:", JSON.stringify(data));
+    }
+  } catch (e) {
+    console.log("❌ 飞书应用 推送异常:", e);
+  }
+}
+
+async function notifyAll(content, title) {
+  await Promise.all([
+    sendTelegramMessage(content),
+    sendFeishuMessage(content, title),
+    sendFeishuAppMessage(content, title),
+  ]);
+}
+
 async function runCheckin() {
   const now = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   let results = [];
@@ -101,8 +211,17 @@ async function runCheckin() {
   summary += results.join("\n\n");
   summary += `\n\n⏰ 执行时间: ${now}`;
 
+  const allOk = results.every((r) => r.includes("🎉") || r.includes("ℹ️"));
+  const allFail = results.every((r) => r.includes("❌") || r.includes("⚠️"));
+  const title = allOk
+    ? "✅ ikuuu 签到成功"
+    : allFail
+      ? "❌ ikuuu 签到失败"
+      : "⚠️ ikuuu 签到部分完成";
+
   console.log(summary);
-  await sendTelegramMessage(summary);
+  await notifyAll(summary, title);
 }
 
 runCheckin().catch(console.error);
+
